@@ -12,10 +12,10 @@
 #include <iterator>
 #include <cstdint>
 #include <boost/algorithm/string/trim.hpp>
-#include <asio/deadline_timer.hpp>
-#include <asio/placeholders.hpp>
-#include <asio/strand.hpp>
-#include <asio/streambuf.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/placeholders.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/streambuf.hpp>
 #include <boost/assert.hpp>
 #include <boost/logic/tribool.hpp>
 #include <boost/network/constants.hpp>
@@ -30,6 +30,7 @@
 #include <boost/network/traits/ostream_iterator.hpp>
 #include <boost/network/version.hpp>
 #include <boost/range/algorithm/transform.hpp>
+#include <boost/range/iterator_range.hpp>
 #include <boost/throw_exception.hpp>
 
 namespace boost {
@@ -37,10 +38,85 @@ namespace network {
 namespace http {
 namespace impl {
 
+template <class buffer_type>
+struct chunk_encoding_parser {
+  typedef typename buffer_type::const_iterator const_iterator;
+  typedef boost::iterator_range<const_iterator> char_const_range;
+
+  chunk_encoding_parser() : state(state_t::header), chunk_size(0) {}
+
+  enum class state_t { header, header_end, data, data_end };
+
+  state_t state;
+  size_t chunk_size;
+  buffer_type buffer;
+
+  template<typename T>
+  void update_chunk_size(boost::iterator_range<T> const &range) {
+    if (range.empty()) return;
+    std::stringstream ss;
+    ss << std::hex << range;
+    size_t size;
+    ss >> size;
+    // New digits are appended as LSBs
+    chunk_size = (chunk_size << (range.size() * 4)) | size;
+  }
+
+  template<typename T>
+  char_const_range operator()(boost::iterator_range<T> const &range) {
+    auto iter = boost::begin(range);
+    auto begin = iter;
+    auto pos = boost::begin(buffer);
+
+    while (iter != boost::end(range)) switch (state) {
+        case state_t::header:
+          iter = std::find(iter, boost::end(range), '\r');
+          update_chunk_size(boost::make_iterator_range(begin, iter));
+          if (iter != boost::end(range)) {
+            state = state_t::header_end;
+            ++iter;
+          }
+          break;
+
+        case state_t::header_end:
+          BOOST_ASSERT(*iter == '\n');
+          ++iter;
+          state = state_t::data;
+          break;
+
+        case state_t::data:
+          if (chunk_size == 0) {
+            BOOST_ASSERT(*iter == '\r');
+            ++iter;
+            state = state_t::data_end;
+          } else {
+            auto len = std::min(chunk_size,
+                                (size_t)std::distance(iter, boost::end(range)));
+            begin = iter;
+            iter = std::next(iter, len);
+            pos = std::copy(begin, iter, pos);
+            chunk_size -= len;
+          }
+          break;
+
+        case state_t::data_end:
+          BOOST_ASSERT(*iter == '\n');
+          ++iter;
+          begin = iter;
+          state = state_t::header;
+          break;
+
+        default:
+          BOOST_ASSERT(false && "Bug, report this to the developers!");
+      }
+    return boost::make_iterator_range(boost::begin(buffer), pos);
+  }
+};
+
 template <class Tag, unsigned version_major, unsigned version_minor>
 struct async_connection_base;
 
-namespace placeholders = asio::placeholders;
+namespace placeholders = boost::asio::placeholders;
 
 template <class Tag, unsigned version_major, unsigned version_minor>
 struct http_async_connection
@@ -61,6 +137,7 @@ struct http_async_connection
   typedef typename base::string_type string_type;
   typedef typename base::request request;
   typedef typename base::resolver_base::resolve_function resolve_function;
+  typedef typename base::char_const_range char_const_range;
   typedef
       typename base::body_callback_function_type body_callback_function_type;
   typedef
@@ -69,11 +146,14 @@ struct http_async_connection
   typedef typename delegate_factory<Tag>::type delegate_factory_type;
   typedef typename delegate_factory_type::connection_delegate_ptr
       connection_delegate_ptr;
+  typedef chunk_encoding_parser<typename protocol_base::buffer_type> chunk_encoding_parser_type;
 
   http_async_connection(resolver_type& resolver, resolve_function resolve,
                         bool follow_redirect, int timeout,
+                        bool remove_chunk_markers,
                         connection_delegate_ptr delegate)
       : timeout_(timeout),
+        remove_chunk_markers_(remove_chunk_markers),
         timer_(resolver.get_io_service()),
         is_timedout_(false),
         follow_redirect_(follow_redirect),
@@ -100,17 +180,19 @@ struct http_async_connection
     string_type host_ = host(request);
     std::uint16_t source_port = request.source_port();
 
+    auto sni_hostname = request.sni_hostname();
+
     auto self = this->shared_from_this();
     resolve_(resolver_, host_, port_,
              request_strand_.wrap(
-                                  [=] (std::error_code const &ec,
+                                  [=] (boost::system::error_code const &ec,
                                        resolver_iterator_pair endpoint_range) {
-                                    self->handle_resolved(host_, port_, source_port, get_body,
+                                    self->handle_resolved(host_, port_, source_port, sni_hostname, get_body,
                                                           callback, generator, ec, endpoint_range);
                                   }));
     if (timeout_ > 0) {
-      timer_.expires_from_now(boost::posix_time::seconds(timeout_));
-      timer_.async_wait(request_strand_.wrap([=] (std::error_code const &ec) {
+      timer_.expires_from_now(std::chrono::seconds(timeout_));
+      timer_.async_wait(request_strand_.wrap([=] (boost::system::error_code const &ec) {
             self->handle_timeout(ec);
           }));
     }
@@ -118,63 +200,63 @@ struct http_async_connection
   }
 
  private:
-  void set_errors(std::error_code const& ec) {
-    std::system_error error(ec);
-    this->version_promise.set_exception(std::make_exception_ptr(error));
-    this->status_promise.set_exception(std::make_exception_ptr(error));
-    this->status_message_promise.set_exception(std::make_exception_ptr(error));
-    this->headers_promise.set_exception(std::make_exception_ptr(error));
-    this->source_promise.set_exception(std::make_exception_ptr(error));
-    this->destination_promise.set_exception(std::make_exception_ptr(error));
-    this->body_promise.set_exception(std::make_exception_ptr(error));
+  void set_errors(boost::system::error_code const& ec, body_callback_function_type callback) {
+    boost::system::system_error error(ec);
+    this->version_promise.set_exception(error);
+    this->status_promise.set_exception(error);
+    this->status_message_promise.set_exception(error);
+    this->headers_promise.set_exception(error);
+    this->source_promise.set_exception(error);
+    this->destination_promise.set_exception(error);
+    this->body_promise.set_exception(error);
+    if ( callback )
+      callback( char_const_range(), ec );
     this->timer_.cancel();
   }
 
-  void handle_timeout(std::error_code const& ec) {
+  void handle_timeout(boost::system::error_code const& ec) {
     if (!ec) delegate_->disconnect();
     is_timedout_ = true;
   }
 
   void handle_resolved(string_type host, std::uint16_t port,
-                       std::uint16_t source_port, bool get_body,
+                       std::uint16_t source_port, optional<string_type> sni_hostname, bool get_body,
                        body_callback_function_type callback,
                        body_generator_function_type generator,
-                       std::error_code const& ec,
+                       boost::system::error_code const& ec,
                        resolver_iterator_pair endpoint_range) {
     if (!ec && !boost::empty(endpoint_range)) {
       // Here we deal with the case that there was an error encountered and
       // that there's still more endpoints to try connecting to.
       resolver_iterator iter = boost::begin(endpoint_range);
-      asio::ip::tcp::endpoint endpoint(iter->endpoint().address(), port);
+      boost::asio::ip::tcp::endpoint endpoint(iter->endpoint().address(), port);
       auto self = this->shared_from_this();
       delegate_->connect(
-          endpoint, host, source_port,
-          request_strand_.wrap([=] (std::error_code const &ec) {
+          endpoint, host, source_port, sni_hostname,
+          request_strand_.wrap([=] (boost::system::error_code const &ec) {
               auto iter_copy = iter;
-              self->handle_connected(host, port, source_port, get_body, callback,
+              self->handle_connected(host, port, source_port, sni_hostname, get_body, callback,
                                      generator, std::make_pair(++iter_copy, resolver_iterator()), ec);
             }));
     } else {
-      set_errors(ec ? ec : asio::error::host_not_found);
-      boost::iterator_range<const char*> range;
-      if (callback) callback(range, ec);
+      set_errors((ec ? ec : boost::asio::error::host_not_found), callback);
     }
   }
 
   void handle_connected(string_type host, std::uint16_t port,
-                        std::uint16_t source_port, bool get_body,
+                        std::uint16_t source_port, optional<string_type> sni_hostname, bool get_body,
                         body_callback_function_type callback,
                         body_generator_function_type generator,
                         resolver_iterator_pair endpoint_range,
-                        std::error_code const& ec) {
+                        boost::system::error_code const& ec) {
     if (is_timedout_) {
-      set_errors(asio::error::timed_out);
+      set_errors(boost::asio::error::timed_out, callback);
     } else if (!ec) {
       BOOST_ASSERT(delegate_.get() != 0);
       auto self = this->shared_from_this();
       delegate_->write(
           command_streambuf,
-          request_strand_.wrap([=] (std::error_code const &ec,
+          request_strand_.wrap([=] (boost::system::error_code const &ec,
                                     std::size_t bytes_transferred) {
                                  self->handle_sent_request(get_body, callback, generator,
                                                            ec, bytes_transferred);
@@ -182,20 +264,18 @@ struct http_async_connection
     } else {
       if (!boost::empty(endpoint_range)) {
         resolver_iterator iter = boost::begin(endpoint_range);
-        asio::ip::tcp::endpoint endpoint(iter->endpoint().address(), port);
+        boost::asio::ip::tcp::endpoint endpoint(iter->endpoint().address(), port);
         auto self = this->shared_from_this();
         delegate_->connect(
-            endpoint, host, source_port,
-            request_strand_.wrap([=] (std::error_code const &ec) {
+            endpoint, host, source_port, sni_hostname,
+            request_strand_.wrap([=] (boost::system::error_code const &ec) {
                 auto iter_copy = iter;
-                self->handle_connected(host, port, source_port, get_body, callback,
+                self->handle_connected(host, port, source_port, sni_hostname, get_body, callback,
                                        generator, std::make_pair(++iter_copy, resolver_iterator()),
                                        ec);
               }));
       } else {
-        set_errors(ec ? ec : asio::error::host_not_found);
-        boost::iterator_range<const char*> range;
-        if (callback) callback(range, ec);
+        set_errors((ec ? ec : boost::asio::error::host_not_found), callback);
       }
     }
   }
@@ -204,8 +284,8 @@ struct http_async_connection
 
   void handle_sent_request(bool get_body, body_callback_function_type callback,
                            body_generator_function_type generator,
-                           std::error_code const& ec,
-                           std::size_t bytes_transferred) {
+                           boost::system::error_code const& ec,
+                           std::size_t /*bytes_transferred*/) {  // TODO(unassigned): use-case?
     if (!is_timedout_ && !ec) {
       if (generator) {
         // Here we write some more data that the generator provides, before we
@@ -220,7 +300,7 @@ struct http_async_connection
           auto self = this->shared_from_this();
           delegate_->write(
               command_streambuf,
-              request_strand_.wrap([=] (std::error_code const &ec,
+              request_strand_.wrap([=] (boost::system::error_code const &ec,
                                         std::size_t bytes_transferred) {
                                      self->handle_sent_request(get_body, callback, generator,
                                                                ec, bytes_transferred);
@@ -231,41 +311,41 @@ struct http_async_connection
 
       auto self = this->shared_from_this();
       delegate_->read_some(
-          asio::mutable_buffers_1(this->part.data(),
+          boost::asio::mutable_buffers_1(this->part.data(),
                                          this->part.size()),
-          request_strand_.wrap([=] (std::error_code const &ec,
+          request_strand_.wrap([=] (boost::system::error_code const &ec,
                                     std::size_t bytes_transferred) {
                                  self->handle_received_data(version, get_body, callback,
                                                             ec, bytes_transferred);
                                }));
     } else {
-      set_errors(is_timedout_ ? asio::error::timed_out : ec);
+      set_errors((is_timedout_ ? boost::asio::error::timed_out : ec), callback);
     }
   }
 
   void handle_received_data(state_t state, bool get_body,
                             body_callback_function_type callback,
-                            std::error_code const& ec,
+                            boost::system::error_code const& ec,
                             std::size_t bytes_transferred) {
     static const long short_read_error = 335544539;
     bool is_ssl_short_read_error =
 #ifdef BOOST_NETWORK_ENABLE_HTTPS
-        ec.category() == asio::error::ssl_category &&
+        ec.category() == boost::asio::error::ssl_category &&
         ec.value() == short_read_error;
 #else
         false && short_read_error;
 #endif
     if (!is_timedout_ &&
-        (!ec || ec == asio::error::eof || is_ssl_short_read_error)) {
+        (!ec || ec == boost::asio::error::eof || is_ssl_short_read_error)) {
       logic::tribool parsed_ok;
       size_t remainder;
       auto self = this->shared_from_this();
       switch (state) {
         case version:
-          if (ec == asio::error::eof) return;
+          if (ec == boost::asio::error::eof) return;
           parsed_ok = this->parse_version(
               delegate_,
-              request_strand_.wrap([=] (std::error_code const &ec,
+              request_strand_.wrap([=] (boost::system::error_code const &ec,
                                         std::size_t bytes_transferred) {
                                      self->handle_received_data(version, get_body, callback,
                                                                 ec, bytes_transferred);
@@ -274,11 +354,12 @@ struct http_async_connection
           if (!parsed_ok || indeterminate(parsed_ok)) {
             return;
           }
+          // fall-through
         case status:
-          if (ec == asio::error::eof) return;
+          if (ec == boost::asio::error::eof) return;
           parsed_ok = this->parse_status(
               delegate_,
-              request_strand_.wrap([=] (std::error_code const &ec,
+              request_strand_.wrap([=] (boost::system::error_code const &ec,
                                         std::size_t bytes_transferred) {
                                      self->handle_received_data(status, get_body, callback,
                                                                 ec, bytes_transferred);
@@ -287,10 +368,11 @@ struct http_async_connection
           if (!parsed_ok || indeterminate(parsed_ok)) {
             return;
           }
+          // fall-through
         case status_message:
-          if (ec == asio::error::eof) return;
+          if (ec == boost::asio::error::eof) return;
           parsed_ok = this->parse_status_message(
-              delegate_, request_strand_.wrap([=] (std::error_code const &,
+              delegate_, request_strand_.wrap([=] (boost::system::error_code const &,
                                                    std::size_t bytes_transferred) {
                                                 self->handle_received_data(status_message, get_body, callback,
                                                                            ec, bytes_transferred);
@@ -299,15 +381,16 @@ struct http_async_connection
           if (!parsed_ok || indeterminate(parsed_ok)) {
             return;
           }
+          // fall-through
         case headers:
-          if (ec == asio::error::eof) return;
+          if (ec == boost::asio::error::eof) return;
           // In the following, remainder is the number of bytes that remain in
           // the buffer. We need this in the body processing to make sure that
           // the data remaining in the buffer is dealt with before another call
           // to get more data for the body is scheduled.
           std::tie(parsed_ok, remainder) = this->parse_headers(
               delegate_,
-              request_strand_.wrap([=] (std::error_code const &ec,
+              request_strand_.wrap([=] (boost::system::error_code const &ec,
                                         std::size_t bytes_transferred) {
                                      self->handle_received_data(headers, get_body, callback,
                                                                 ec, bytes_transferred);
@@ -322,6 +405,8 @@ struct http_async_connection
             // We short-circuit here because the user does not want to get the
             // body (in the case of a HEAD request).
             this->body_promise.set_value("");
+            if ( callback )
+              callback( char_const_range(), boost::asio::error::eof );
             this->destination_promise.set_value("");
             this->source_promise.set_value("");
             // this->part.assign('\0');
@@ -348,13 +433,16 @@ struct http_async_connection
 
             // The invocation of the callback is synchronous to allow us to
             // wait before scheduling another read.
-            callback(make_iterator_range(begin, end), ec);
-
+            if (this->is_chunk_encoding && remove_chunk_markers_) {
+              callback(parse_chunk_encoding(make_iterator_range(begin, end)), ec);
+            } else {
+              callback(make_iterator_range(begin, end), ec);
+            }
             auto self = this->shared_from_this();
             delegate_->read_some(
-                asio::mutable_buffers_1(this->part.data(),
+                boost::asio::mutable_buffers_1(this->part.data(),
                                                this->part.size()),
-                request_strand_.wrap([=] (std::error_code const &ec,
+                request_strand_.wrap([=] (boost::system::error_code const &ec,
                                           std::size_t bytes_transferred) {
                                        self->handle_received_data(body, get_body, callback,
                                                                   ec, bytes_transferred);
@@ -365,7 +453,7 @@ struct http_async_connection
             auto self = this->shared_from_this();
             this->parse_body(
                 delegate_,
-                request_strand_.wrap([=] (std::error_code const &ec,
+                request_strand_.wrap([=] (boost::system::error_code const &ec,
                                           std::size_t bytes_transferred) {
                                        self->handle_received_data(body, get_body, callback,
                                                                   ec, bytes_transferred);
@@ -374,7 +462,7 @@ struct http_async_connection
           }
           return;
         case body:
-          if (ec == asio::error::eof || is_ssl_short_read_error) {
+          if (ec == boost::asio::error::eof || is_ssl_short_read_error) {
             // Here we're handling the case when the connection has been closed
             // from the server side, or at least that the end of file has been
             // reached while reading the socket. This signals the end of the
@@ -388,14 +476,32 @@ struct http_async_connection
               // We call the callback function synchronously passing the error
               // condition (in this case, end of file) so that it can handle it
               // appropriately.
-              callback(make_iterator_range(begin, end), ec);
+              if (this->is_chunk_encoding && remove_chunk_markers_) {
+                callback(parse_chunk_encoding(make_iterator_range(begin, end)), ec);
+              } else {
+                callback(make_iterator_range(begin, end), ec);
+              }
             } else {
               string_type body_string;
-              std::swap(body_string, this->partial_parsed);
-              body_string.append(this->part.begin(), bytes_transferred);
-              if (this->is_chunk_encoding) {
-                this->body_promise.set_value(parse_chunk_encoding(body_string));
+              if (this->is_chunk_encoding && remove_chunk_markers_) {
+                const auto parse_buffer_size = parse_chunk_encoding.buffer.size();
+                for (size_t i = 0; i < this->partial_parsed.size(); i += parse_buffer_size) {
+                  auto range = parse_chunk_encoding(boost::make_iterator_range(
+                      this->partial_parsed.cbegin() + i,
+                      this->partial_parsed.cbegin() +
+                          std::min(i + parse_buffer_size, this->partial_parsed.size())));
+                  body_string.append(boost::begin(range), boost::end(range));
+                }
+                this->partial_parsed.clear();
+                auto range = parse_chunk_encoding(boost::make_iterator_range(
+                    this->part.begin(),
+                    this->part.begin() + bytes_transferred));
+                body_string.append(boost::begin(range), boost::end(range));
+                this->body_promise.set_value(body_string);
               } else {
+                std::swap(body_string, this->partial_parsed);
+                body_string.append(this->part.begin(),
+                                   this->part.begin() + bytes_transferred);
                 this->body_promise.set_value(body_string);
               }
             }
@@ -417,12 +523,16 @@ struct http_async_connection
                   this->part.begin();
               typename protocol_base::buffer_type::const_iterator end = begin;
               std::advance(end, bytes_transferred);
-              callback(make_iterator_range(begin, end), ec);
+              if (this->is_chunk_encoding && remove_chunk_markers_) {
+                callback(parse_chunk_encoding(make_iterator_range(begin, end)), ec);
+              } else {
+                callback(make_iterator_range(begin, end), ec);
+              }
               auto self = this->shared_from_this();
               delegate_->read_some(
-                  asio::mutable_buffers_1(this->part.data(),
+                  boost::asio::mutable_buffers_1(this->part.data(),
                                                  this->part.size()),
-                  request_strand_.wrap([=] (std::error_code const &ec,
+                  request_strand_.wrap([=] (boost::system::error_code const &ec,
                                             std::size_t bytes_transferred) {
                                          self->handle_received_data(body, get_body, callback,
                                                                     ec, bytes_transferred);
@@ -433,7 +543,7 @@ struct http_async_connection
               // have data that's still in the buffer.
               this->parse_body(
                   delegate_,
-                  request_strand_.wrap([=] (std::error_code const &ec,
+                  request_strand_.wrap([=] (boost::system::error_code const &ec,
                                             std::size_t bytes_transferred) {
                                          self->handle_received_data(body, get_body, callback,
                                                                     ec, bytes_transferred);
@@ -446,75 +556,52 @@ struct http_async_connection
           BOOST_ASSERT(false && "Bug, report this to the developers!");
       }
     } else {
-      std::system_error error(is_timedout_ ? asio::error::timed_out
-                              : ec);
-      this->source_promise.set_exception(std::make_exception_ptr(error));
-      this->destination_promise.set_exception(std::make_exception_ptr(error));
+      boost::system::error_code report_code = is_timedout_ ? boost::asio::error::timed_out : ec;
+      boost::system::system_error error(report_code);
+      this->source_promise.set_exception(error);
+      this->destination_promise.set_exception(error);
       switch (state) {
         case version:
-          this->version_promise.set_exception(std::make_exception_ptr(error));
+          this->version_promise.set_exception(error);
+          // fall-through
         case status:
-          this->status_promise.set_exception(std::make_exception_ptr(error));
+          this->status_promise.set_exception(error);
+          // fall-through
         case status_message:
-          this->status_message_promise.set_exception(
-              std::make_exception_ptr(error));
+          this->status_message_promise.set_exception(error);
+          // fall-through
         case headers:
-          this->headers_promise.set_exception(std::make_exception_ptr(error));
+          this->headers_promise.set_exception(error);
+          // fall-through
         case body:
           if (!callback) {
             // N.B. if callback is non-null, then body_promise has already been
             // set to value "" to indicate body is handled by streaming handler
             // so no exception should be set
-            this->body_promise.set_exception(std::make_exception_ptr(error));
+            this->body_promise.set_exception(error);
           }
+          else
+            callback( char_const_range(), report_code );
           break;
+          // fall-through
         default:
           BOOST_ASSERT(false && "Bug, report this to the developers!");
       }
     }
   }
 
-  string_type parse_chunk_encoding(string_type& body_string) {
-    string_type body;
-    string_type crlf = "\r\n";
-
-    typename string_type::iterator begin = body_string.begin();
-    for (typename string_type::iterator iter =
-             std::search(begin, body_string.end(), crlf.begin(), crlf.end());
-         iter != body_string.end();
-         iter =
-             std::search(begin, body_string.end(), crlf.begin(), crlf.end())) {
-      string_type line(begin, iter);
-      if (line.empty()) {
-        break;
-      }
-      std::stringstream stream(line);
-      int len;
-      stream >> std::hex >> len;
-      std::advance(iter, 2);
-      if (len == 0) {
-        break;
-      }
-      if (len <= body_string.end() - iter) {
-        body.insert(body.end(), iter, iter + len);
-        std::advance(iter, len + 2);
-      }
-      begin = iter;
-    }
-
-    return body;
-  }
-
   int timeout_;
-  asio::deadline_timer timer_;
+  bool remove_chunk_markers_;
+  boost::asio::steady_timer timer_;
   bool is_timedout_;
   bool follow_redirect_;
   resolver_type& resolver_;
   resolve_function resolve_;
-  asio::io_service::strand request_strand_;
+  boost::asio::io_service::strand request_strand_;
   connection_delegate_ptr delegate_;
-  asio::streambuf command_streambuf;
+  boost::asio::streambuf command_streambuf;
   string_type method;
+  chunk_encoding_parser_type parse_chunk_encoding;
 };
 
 }  // namespace impl

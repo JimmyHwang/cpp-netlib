@@ -25,14 +25,16 @@ struct body_handler {
 
 TYPED_TEST_CASE(HTTPClientTest, ClientTypes);
 
+#ifdef BOOST_NETWORK_ENABLE_HTTPS
 TYPED_TEST(HTTPClientTest, GetStreamingTest) {
-  typename TypeParam::request request("http://www.boost.org");
+  typename TypeParam::request request("https://www.boost.org");
   typename TypeParam::response response;
   typename TypeParam::string_type body_string;
   typename TypeParam::string_type dummy_body;
   body_handler handler_instance(body_string);
   {
-    TypeParam client_;
+    using client = TypeParam;
+    client client_;
     ASSERT_NO_THROW(response = client_.get(request, handler_instance));
     auto range = headers(response)["Content-Type"];
     ASSERT_TRUE(!boost::empty(range));
@@ -44,3 +46,4 @@ TYPED_TEST(HTTPClientTest, GetStreamingTest) {
   }
   EXPECT_EQ(dummy_body, typename TypeParam::string_type());
 }
+#endif

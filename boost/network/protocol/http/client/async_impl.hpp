@@ -11,8 +11,9 @@
 #include <thread>
 #include <memory>
 #include <functional>
-#include <asio/io_service.hpp>
-#include <asio/strand.hpp>
+#include <boost/asio/io_service.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/network/protocol/http/client/macros.hpp>
 #include <boost/network/protocol/http/traits/connection_policy.hpp>
 
 namespace boost {
@@ -31,27 +32,34 @@ struct async_client
   typedef typename resolver<Tag>::type resolver_type;
   typedef typename string<Tag>::type string_type;
 
-  typedef std::function<void(boost::iterator_range<char const*> const&,
-                             std::error_code const&)>
+  typedef
+      typename std::array<typename char_<Tag>::type,
+                          BOOST_NETWORK_HTTP_CLIENT_CONNECTION_BUFFER_SIZE>::
+          const_iterator const_iterator;
+  typedef iterator_range<const_iterator> char_const_range;
+
+  typedef std::function<void(char_const_range,
+                             boost::system::error_code const&)>
       body_callback_function_type;
 
   typedef std::function<bool(string_type&)> body_generator_function_type;
 
   async_client(bool cache_resolved, bool follow_redirect,
-               bool always_verify_peer, int timeout,
-               std::shared_ptr<asio::io_service> service,
+               bool always_verify_peer, int timeout, bool remove_chunk_markers,
+               std::shared_ptr<boost::asio::io_service> service,
                optional<string_type> certificate_filename,
                optional<string_type> verify_path,
                optional<string_type> certificate_file,
                optional<string_type> private_key_file,
                optional<string_type> ciphers,
                optional<string_type> sni_hostname, long ssl_options)
-      : connection_base(cache_resolved, follow_redirect, timeout),
+      : connection_base(cache_resolved, follow_redirect, timeout,
+                        remove_chunk_markers),
         service_ptr(service.get() ? service
-                                  : std::make_shared<asio::io_service>()),
+                                  : std::make_shared<boost::asio::io_service>()),
         service_(*service_ptr),
         resolver_(service_),
-        sentinel_(new asio::io_service::work(service_)),
+        sentinel_(new boost::asio::io_service::work(service_)),
         certificate_filename_(std::move(certificate_filename)),
         verify_path_(std::move(verify_path)),
         certificate_file_(std::move(certificate_file)),
@@ -61,7 +69,7 @@ struct async_client
         ssl_options_(ssl_options),
         always_verify_peer_(always_verify_peer) {
     connection_base::resolver_strand_.reset(
-        new asio::io_service::strand(service_));
+        new boost::asio::io_service::strand(service_));
     if (!service)
       lifetime_thread_.reset(new std::thread([this]() { service_.run(); }));
   }
@@ -71,7 +79,9 @@ struct async_client
   void wait_complete() {
     sentinel_.reset();
     if (lifetime_thread_.get()) {
-      lifetime_thread_->join();
+      if (lifetime_thread_->joinable() && lifetime_thread_->get_id() != std::this_thread::get_id()) {
+        lifetime_thread_->join();
+      }
       lifetime_thread_.reset();
     }
   }
@@ -89,10 +99,10 @@ struct async_client
                                      generator);
   }
 
-  std::shared_ptr<asio::io_service> service_ptr;
-  asio::io_service& service_;
+  std::shared_ptr<boost::asio::io_service> service_ptr;
+  boost::asio::io_service& service_;
   resolver_type resolver_;
-  std::shared_ptr<asio::io_service::work> sentinel_;
+  std::shared_ptr<boost::asio::io_service::work> sentinel_;
   std::shared_ptr<std::thread> lifetime_thread_;
   optional<string_type> certificate_filename_;
   optional<string_type> verify_path_;

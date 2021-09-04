@@ -40,13 +40,19 @@ class basic_client_facade {
   /** The response type. This models the HTTP Response concept.*/
   typedef basic_response<Tag> response;
 
+  typedef
+      typename std::array<typename char_<Tag>::type,
+                          BOOST_NETWORK_HTTP_CLIENT_CONNECTION_BUFFER_SIZE>::
+          const_iterator const_iterator;
+  typedef iterator_range<const_iterator> char_const_range;
+
   /**
    * This callback is invoked with a range representing part of the response's
    * body as it comes in. In case of errors, the second argument is an error
    * code.
    */
-  typedef std::function<void(iterator_range<char const*> const&,
-                             std::error_code const&)>
+  typedef std::function<void(char_const_range,
+                             boost::system::error_code const&)>
       body_callback_function_type;
 
   /**
@@ -128,7 +134,7 @@ class basic_client_facade {
     } else {
       if (boost::empty(content_type_headers)) {
         typedef typename char_<Tag>::type char_type;
-        static char_type content_type[] = "x-application/octet-stream";
+        static char_type const content_type[] = "x-application/octet-stream";
         request << header("Content-Type", content_type);
       }
     }
@@ -233,7 +239,7 @@ class basic_client_facade {
     } else {
       if (boost::empty(content_type_headers)) {
         typedef typename char_<Tag>::type char_type;
-        static char_type content_type[] = "x-application/octet-stream";
+        static char_type const content_type[] = "x-application/octet-stream";
         request << header("Content-Type", content_type);
       }
     }
@@ -309,7 +315,8 @@ class basic_client_facade {
         options.openssl_verify_path(), options.openssl_certificate_file(),
         options.openssl_private_key_file(), options.openssl_ciphers(),
         options.openssl_sni_hostname(), options.openssl_options(),
-        options.io_service(), options.timeout()));
+        options.io_service(), options.timeout(),
+        options.remove_chunk_markers()));
   }
 };
 

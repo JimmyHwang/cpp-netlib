@@ -12,6 +12,8 @@ option( CPP-NETLIB_BUILD_TESTS "Build the cpp-netlib project tests." ON)
 # option( CPP-NETLIB_BUILD_EXPERIMENTS "Build the cpp-netlib project experiments." ON)
 option( CPP-NETLIB_BUILD_EXAMPLES "Build the cpp-netlib project examples." ON)
 option( CPP-NETLIB_ENABLE_HTTPS "Build cpp-netlib with support for https if OpenSSL is found." ON)
+option( CPP-NETLIB_STATIC_OPENSSL "Build cpp-netlib using static OpenSSL" OFF)
+option( CPP-NETLIB_STATIC_BOOST "Build cpp-netlib using static Boost" OFF)
 
 include(GNUInstallDirs)
 
@@ -37,8 +39,10 @@ else()
   set(BUILD_SHARED_LIBS OFF)
 endif()
 
-# Always use Boost's shared libraries.
-set(Boost_USE_STATIC_LIBS OFF)
+# Use Boost's static libraries
+if (CPP-NETLIB_STATIC_BOOST)
+  set(Boost_USE_STATIC_LIBS ON)
+endif()
 
 # We need this for all tests to use the dynamic version.
 add_definitions(-DBOOST_TEST_DYN_LINK)
@@ -46,17 +50,36 @@ add_definitions(-DBOOST_TEST_DYN_LINK)
 # Always use multi-threaded Boost libraries.
 set(Boost_USE_MULTI_THREADED ON)
 
-find_package(Boost 1.57.0 REQUIRED)
+find_package(Boost 1.58.0 REQUIRED COMPONENTS system thread)
 
 if (CPP-NETLIB_ENABLE_HTTPS)
-    find_package( OpenSSL )
+ if (APPLE)
+   # If we're on OS X check for Homebrew's copy of OpenSSL instead of Apple's
+   if (NOT OpenSSL_DIR)
+     find_program(HOMEBREW brew)
+     if (HOMEBREW STREQUAL "HOMEBREW-NOTFOUND")
+       message(WARNING "Homebrew not found: not using Homebrew's OpenSSL")
+       if (NOT OPENSSL_ROOT_DIR)
+         message(WARNING "Use -DOPENSSL_ROOT_DIR for non-Apple OpenSSL")
+       endif()
+     else()
+       execute_process(COMMAND brew --prefix openssl
+         OUTPUT_VARIABLE OPENSSL_ROOT_DIR
+         OUTPUT_STRIP_TRAILING_WHITESPACE)
+     endif()
+   endif()
+ endif()
+ if (CPP-NETLIB_STATIC_OPENSSL)
+   set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+ endif()
+ find_package(OpenSSL)
 endif()
 
 find_package( Threads )
 set(CMAKE_VERBOSE_MAKEFILE true)
 
 set(CPPNETLIB_VERSION_MAJOR 0) # MUST bump this whenever we make ABI-incompatible changes
-set(CPPNETLIB_VERSION_MINOR 12)
+set(CPPNETLIB_VERSION_MINOR 13)
 set(CPPNETLIB_VERSION_PATCH 0)
 set(CPPNETLIB_VERSION_STRING ${CPPNETLIB_VERSION_MAJOR}.${CPPNETLIB_VERSION_MINOR}.${CPPNETLIB_VERSION_PATCH})
 
@@ -84,6 +107,11 @@ elseif (${CMAKE_CXX_COMPILER_ID} MATCHES Clang)
 endif()
 
 
+if (MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /bigobj")
+    set(gtest_force_shared_crt true)
+endif()
+
 if (Boost_FOUND)
     if (MSVC)
       add_definitions(-D_SCL_SECURE_NO_WARNINGS)
@@ -92,10 +120,7 @@ if (Boost_FOUND)
       add_definitions(-D_WIN32_WINNT=0x0501)
     endif(WIN32)
     include_directories(${Boost_INCLUDE_DIRS})
-
-    # Asio
-    add_definitions(-DASIO_HEADER_ONLY)
-    include_directories(deps/asio/asio/include)
+    link_directories(${Boost_LIBRARY_DIRS})
 
     enable_testing()
     add_subdirectory(libs/network/src)
@@ -103,22 +128,14 @@ if (Boost_FOUND)
       add_subdirectory(deps/googletest)
       add_subdirectory(libs/network/test)
     endif (CPP-NETLIB_BUILD_TESTS)
-    # if (CPP-NETLIB_BUILD_EXPERIMENTS)
-    #   add_subdirectory(libs/network/experiment)
-    # endif (CPP-NETLIB_BUILD_EXPERIMENTS)
-    # if (NOT MSVC AND CPP-NETLIB_BUILD_TESTS)
-    #   add_subdirectory(libs/mime/test)
-    # endif(NOT MSVC AND CPP-NETLIB_BUILD_TESTS)
     if (CPP-NETLIB_BUILD_EXAMPLES)
       add_subdirectory(libs/network/example)
     endif (CPP-NETLIB_BUILD_EXAMPLES)
 endif(Boost_FOUND)
 
-if (MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /bigobj")
-endif()
-
 enable_testing()
+
+set(CPP-NETLIB_LIBRARIES ${Boost_LIBRARIES} CACHE INTERNAL "Dependent libraries for header-only use")
 
 install(DIRECTORY boost DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 

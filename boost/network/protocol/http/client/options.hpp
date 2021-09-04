@@ -8,7 +8,7 @@
 // http://www.boost.org/LICENSE_1_0.txt)
 
 #include <memory>
-#include <asio/io_service.hpp>
+#include <boost/asio/io_service.hpp>
 #include <boost/network/traits/string.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -34,7 +34,8 @@ class client_options {
         openssl_options_(0),
         io_service_(),
         always_verify_peer_(true),
-        timeout_(0) {}
+        timeout_(0),
+        remove_chunk_markers_(true) {}
 
   client_options(client_options const& other)
       : cache_resolved_(other.cache_resolved_),
@@ -48,7 +49,8 @@ class client_options {
         openssl_options_(other.openssl_options_),
         io_service_(other.io_service_),
         always_verify_peer_(other.always_verify_peer_),
-        timeout_(other.timeout_) {}
+        timeout_(other.timeout_),
+        remove_chunk_markers_(other.remove_chunk_markers_) {}
 
   client_options& operator=(client_options other) {
     other.swap(*this);
@@ -69,6 +71,7 @@ class client_options {
     swap(io_service_, other.io_service_);
     swap(always_verify_peer_, other.always_verify_peer_);
     swap(timeout_, other.timeout_);
+    swap(remove_chunk_markers_, other.remove_chunk_markers_);
   }
 
   /// Specify whether the client should cache resolved endpoints.
@@ -91,39 +94,39 @@ class client_options {
   /// Set the filename of the certificate to load for the SSL connection for
   /// verification.
   client_options& openssl_certificate(string_type const& v) {
-    openssl_certificate_ = v;
+    openssl_certificate_ = make_optional(v);
     return *this;
   }
 
   /// Set the directory for which the certificate authority files are located.
   client_options& openssl_verify_path(string_type const& v) {
-    openssl_verify_path_ = v;
+    openssl_verify_path_ = make_optional(v);
     return *this;
   }
 
   /// Set the filename of the certificate to use for client-side SSL session
   /// establishment.
   client_options& openssl_certificate_file(string_type const& v) {
-    openssl_certificate_file_ = v;
+    openssl_certificate_file_ = make_optional(v);
     return *this;
   }
 
   /// Set the filename of the private key to use for client-side SSL session
   /// establishment.
   client_options& openssl_private_key_file(string_type const& v) {
-    openssl_private_key_file_ = v;
+    openssl_private_key_file_ = make_optional(v);
     return *this;
   }
 
   /// Set the ciphers to support for SSL negotiation.
   client_options& openssl_ciphers(string_type const& v) {
-    openssl_ciphers_ = v;
+    openssl_ciphers_ = make_optional(v);
     return *this;
   }
 
   /// Set the hostname for SSL SNI hostname support.
   client_options& openssl_sni_hostname(string_type const& v) {
-    openssl_sni_hostname_ = v;
+    openssl_sni_hostname_ = make_optional(v);
     return *this;
   }
 
@@ -133,8 +136,8 @@ class client_options {
     return *this;
   }
 
-  /// Provide an `asio::io_service` hosted in a shared pointer.
-  client_options& io_service(std::shared_ptr<asio::io_service> v) {
+  /// Provide an `boost::asio::io_service` hosted in a shared pointer.
+  client_options& io_service(std::shared_ptr<boost::asio::io_service> v) {
     io_service_ = v;
     return *this;
   }
@@ -151,6 +154,12 @@ class client_options {
   /// Set an overall timeout for HTTP requests.
   client_options& timeout(int v) {
     timeout_ = v;
+    return *this;
+  }
+
+  /// Set whether we process chunked-encoded streams.
+  client_options& remove_chunk_markers(bool v) {
+    remove_chunk_markers_ = v;
     return *this;
   }
 
@@ -184,11 +193,13 @@ class client_options {
 
   long openssl_options() const { return openssl_options_; }
 
-  std::shared_ptr<asio::io_service> io_service() const { return io_service_; }
+  std::shared_ptr<boost::asio::io_service> io_service() const { return io_service_; }
 
   bool always_verify_peer() const { return always_verify_peer_; }
 
   int timeout() const { return timeout_; }
+
+  bool remove_chunk_markers() const { return remove_chunk_markers_; }
 
  private:
   bool cache_resolved_;
@@ -200,9 +211,10 @@ class client_options {
   boost::optional<string_type> openssl_ciphers_;
   boost::optional<string_type> openssl_sni_hostname_;
   long openssl_options_;
-  std::shared_ptr<asio::io_service> io_service_;
+  std::shared_ptr<boost::asio::io_service> io_service_;
   bool always_verify_peer_;
   int timeout_;
+  bool remove_chunk_markers_;
 };
 
 template <class Tag>

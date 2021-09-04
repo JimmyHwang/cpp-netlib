@@ -13,10 +13,12 @@
 #include <array>
 #include <boost/logic/tribool.hpp>
 #include <boost/network/detail/debug.hpp>
+#include <boost/network/protocol/http/client/macros.hpp>
 #include <boost/network/protocol/http/algorithms/linearize.hpp>
 #include <boost/network/protocol/http/parser/incremental.hpp>
 #include <boost/network/protocol/http/request_parser.hpp>
 #include <boost/network/traits/string.hpp>
+#include <boost/thread/future.hpp>
 
 namespace boost {
 namespace network {
@@ -57,30 +59,30 @@ struct http_async_protocol_handler {
     // TODO(dberris): review parameter necessity.
     (void)get_body;
 
-    std::shared_future<string_type> source_future(
+    boost::shared_future<string_type> source_future(
         source_promise.get_future());
     source(response_, source_future);
 
-    std::shared_future<string_type> destination_future(
+    boost::shared_future<string_type> destination_future(
         destination_promise.get_future());
     destination(response_, destination_future);
 
-    std::shared_future<typename headers_container<Tag>::type> headers_future(
+    boost::shared_future<typename headers_container<Tag>::type> headers_future(
         headers_promise.get_future());
     headers(response_, headers_future);
 
-    std::shared_future<string_type> body_future(body_promise.get_future());
+    boost::shared_future<string_type> body_future(body_promise.get_future());
     body(response_, body_future);
 
-    std::shared_future<string_type> version_future(
+    boost::shared_future<string_type> version_future(
         version_promise.get_future());
     version(response_, version_future);
 
-    std::shared_future<std::uint16_t> status_future(
+    boost::shared_future<std::uint16_t> status_future(
         status_promise.get_future());
     status(response_, status_future);
 
-    std::shared_future<string_type> status_message_future(
+    boost::shared_future<string_type> status_message_future(
         status_message_promise.get_future());
     status_message(response_, status_message_future);
   }
@@ -127,19 +129,19 @@ struct http_async_protocol_handler {
                                        << "\"");
 #endif
       std::runtime_error error("Invalid Version Part.");
-      version_promise.set_exception(std::make_exception_ptr(error));
-      status_promise.set_exception(std::make_exception_ptr(error));
-      status_message_promise.set_exception(std::make_exception_ptr(error));
-      headers_promise.set_exception(std::make_exception_ptr(error));
-      source_promise.set_exception(std::make_exception_ptr(error));
-      destination_promise.set_exception(std::make_exception_ptr(error));
-      body_promise.set_exception(std::make_exception_ptr(error));
+      version_promise.set_exception(error);
+      status_promise.set_exception(error);
+      status_message_promise.set_exception(error);
+      headers_promise.set_exception(error);
+      source_promise.set_exception(error);
+      destination_promise.set_exception(error);
+      body_promise.set_exception(error);
     } else {
       partial_parsed.append(std::begin(result_range),
                             std::end(result_range));
       part_begin = part.begin();
       delegate_->read_some(
-          asio::mutable_buffers_1(part.data(), part.size()),
+          boost::asio::mutable_buffers_1(part.data(), part.size()),
           callback);
     }
     return parsed_ok;
@@ -174,18 +176,18 @@ struct http_async_protocol_handler {
                                        << "\"");
 #endif
       std::runtime_error error("Invalid status part.");
-      status_promise.set_exception(std::make_exception_ptr(error));
-      status_message_promise.set_exception(std::make_exception_ptr(error));
-      headers_promise.set_exception(std::make_exception_ptr(error));
-      source_promise.set_exception(std::make_exception_ptr(error));
-      destination_promise.set_exception(std::make_exception_ptr(error));
-      body_promise.set_exception(std::make_exception_ptr(error));
+      status_promise.set_exception(error);
+      status_message_promise.set_exception(error);
+      headers_promise.set_exception(error);
+      source_promise.set_exception(error);
+      destination_promise.set_exception(error);
+      body_promise.set_exception(error);
     } else {
       partial_parsed.append(std::begin(result_range),
                             std::end(result_range));
       part_begin = part.begin();
       delegate_->read_some(
-          asio::mutable_buffers_1(part.data(), part.size()),
+          boost::asio::mutable_buffers_1(part.data(), part.size()),
           callback);
     }
     return parsed_ok;
@@ -220,17 +222,17 @@ struct http_async_protocol_handler {
                                        << "\"");
 #endif
       std::runtime_error error("Invalid status message part.");
-      status_message_promise.set_exception(std::make_exception_ptr(error));
-      headers_promise.set_exception(std::make_exception_ptr(error));
-      source_promise.set_exception(std::make_exception_ptr(error));
-      destination_promise.set_exception(std::make_exception_ptr(error));
-      body_promise.set_exception(std::make_exception_ptr(error));
+      status_message_promise.set_exception(error);
+      headers_promise.set_exception(error);
+      source_promise.set_exception(error);
+      destination_promise.set_exception(error);
+      body_promise.set_exception(error);
     } else {
       partial_parsed.append(std::begin(result_range),
                             std::end(result_range));
       part_begin = part.begin();
       delegate_->read_some(
-          asio::mutable_buffers_1(part.data(), part.size()),
+          boost::asio::mutable_buffers_1(part.data(), part.size()),
           callback);
     }
     return parsed_ok;
@@ -245,6 +247,10 @@ struct http_async_protocol_handler {
         response_parser_type::http_header_line_done);
     typename headers_container<Tag>::type headers;
     std::pair<string_type, string_type> header_pair;
+    //init params
+    is_content_length = false;
+    content_length = -1;
+    is_chunk_end = false;
     while (!boost::empty(input_range)) {
       std::tie(parsed_ok, result_range) = headers_parser.parse_until(
           response_parser_type::http_header_colon, input_range);
@@ -265,6 +271,16 @@ struct http_async_protocol_handler {
       }
       trim(header_pair.second);
       headers.insert(header_pair);
+      if (!is_content_length && 
+          boost::iequals(header_pair.first, "Content-Length")) {
+        try {
+          content_length = std::stoll(header_pair.second);
+          is_content_length = true;
+        }
+        catch (std::exception&) {
+          //is_content_length = false;
+        }
+      }
     }
     // determine if the body parser will need to handle chunked encoding
     typename headers_range<basic_response<Tag> >::type transfer_encoding_range =
@@ -308,48 +324,101 @@ struct http_async_protocol_handler {
                                        << boost::distance(result_range));
 #endif
       std::runtime_error error("Invalid header part.");
-      headers_promise.set_exception(std::make_exception_ptr(error));
-      body_promise.set_exception(std::make_exception_ptr(error));
-      source_promise.set_exception(std::make_exception_ptr(error));
-      destination_promise.set_exception(std::make_exception_ptr(error));
+      headers_promise.set_exception(error);
+      body_promise.set_exception(error);
+      source_promise.set_exception(error);
+      destination_promise.set_exception(error);
     } else {
       partial_parsed.append(std::begin(result_range),
                             std::end(result_range));
       part_begin = part.begin();
       delegate_->read_some(
-          asio::mutable_buffers_1(part.data(), part.size()),
+          boost::asio::mutable_buffers_1(part.data(), part.size()),
           callback);
     }
     return std::make_tuple(
         parsed_ok, std::distance(std::end(result_range), part_end));
   }
 
+  inline bool check_parse_body_complete() const {
+    if (this->is_chunk_encoding) {
+      return parse_chunk_encoding_complete();
+    }
+    if (this->is_content_length && this->content_length >= 0) {
+      return parse_content_length_complete();
+    }
+    return false;
+  }
+  
+  inline bool parse_content_length_complete() const {
+    return this->partial_parsed.length() >= this-> content_length;
+  }
+
+  bool parse_chunk_encoding_complete() const {
+    string_type body;
+    string_type crlf = "\r\n";
+
+    typename string_type::const_iterator begin = partial_parsed.begin();
+    for (typename string_type::const_iterator iter =
+             std::search(begin, partial_parsed.end(), crlf.begin(), crlf.end());
+         iter != partial_parsed.end();
+         iter = std::search(begin, partial_parsed.end(), crlf.begin(), crlf.end())) {
+      string_type line(begin, iter);
+      if (line.empty()) {
+        std::advance(iter, 2);
+        begin = iter;
+        continue;
+      }
+      std::stringstream stream(line);
+      int len;
+      stream >> std::hex >> len;
+      std::advance(iter, 2);
+      if (!len) return true;
+      if (len <= partial_parsed.end() - iter) {
+        std::advance(iter, len);
+	  } else {
+		return false;
+	  }
+      begin = iter;
+    }
+    return false;
+  }
+
   template <class Delegate, class Callback>
   void parse_body(Delegate& delegate_, Callback callback, size_t bytes) {
     // TODO(dberris): we should really not use a string for the partial body
     // buffer.
-    partial_parsed.append(part_begin, bytes);
+    auto it = part_begin;
+	std::advance(it, bytes);
+    partial_parsed.append(part_begin, it);
     part_begin = part.begin();
-    delegate_->read_some(
-        asio::mutable_buffers_1(part.data(), part.size()), callback);
+    if (check_parse_body_complete()) {
+      callback(boost::asio::error::eof, 0);
+    } else {
+      delegate_->read_some(
+          boost::asio::mutable_buffers_1(part.data(), part.size()), callback);
+    }
   }
 
   typedef response_parser<Tag> response_parser_type;
-  // TODO(dberris): make 1024 go away and become a configurable value.
-  typedef std::array<typename char_<Tag>::type, 1024> buffer_type;
+  typedef std::array<typename char_<Tag>::type,
+                     BOOST_NETWORK_HTTP_CLIENT_CONNECTION_BUFFER_SIZE> buffer_type;
 
   response_parser_type response_parser_;
-  std::promise<string_type> version_promise;
-  std::promise<std::uint16_t> status_promise;
-  std::promise<string_type> status_message_promise;
-  std::promise<typename headers_container<Tag>::type> headers_promise;
-  std::promise<string_type> source_promise;
-  std::promise<string_type> destination_promise;
-  std::promise<string_type> body_promise;
+  boost::promise<string_type> version_promise;
+  boost::promise<std::uint16_t> status_promise;
+  boost::promise<string_type> status_message_promise;
+  boost::promise<typename headers_container<Tag>::type> headers_promise;
+  boost::promise<string_type> source_promise;
+  boost::promise<string_type> destination_promise;
+  boost::promise<string_type> body_promise;
   buffer_type part;
   typename buffer_type::const_iterator part_begin;
   string_type partial_parsed;
   bool is_chunk_encoding;
+  bool is_chunk_end;
+  bool is_content_length;
+  long long unsigned content_length;
 };
 
 }  // namespace impl

@@ -9,11 +9,13 @@
 // http://www.boost.org/LICENSE_1_0.txt)
 
 #include <functional>
+#include <array>
 #include <boost/network/protocol/http/client/connection/connection_delegate_factory.hpp>
 #include <boost/network/protocol/http/response.hpp>
 #include <boost/network/protocol/http/traits/delegate_factory.hpp>
 #include <boost/network/protocol/http/client/connection/async_normal.hpp>
 #include <boost/network/protocol/http/traits/resolver_policy.hpp>
+#include <boost/network/traits/string.hpp>
 
 namespace boost {
 namespace network {
@@ -29,8 +31,12 @@ struct async_connection_base {
   typedef typename string<Tag>::type string_type;
   typedef basic_request<Tag> request;
   typedef basic_response<Tag> response;
-  typedef iterator_range<char const *> char_const_range;
-  typedef std::function<void(char_const_range const &, std::error_code const &)>
+  typedef
+      typename std::array<typename char_<Tag>::type,
+                          BOOST_NETWORK_HTTP_CLIENT_CONNECTION_BUFFER_SIZE>::
+          const_iterator const_iterator;
+  typedef iterator_range<const_iterator> char_const_range;
+  typedef std::function<void(char_const_range const &, boost::system::error_code const &)>
       body_callback_function_type;
   typedef std::function<bool(string_type &)> body_generator_function_type;
   typedef std::shared_ptr<this_type> connection_ptr;
@@ -41,6 +47,7 @@ struct async_connection_base {
   static connection_ptr new_connection(
       resolve_function resolve, resolver_type &resolver, bool follow_redirect,
       bool always_verify_peer, bool https, int timeout,
+      bool remove_chunk_markers,
       optional<string_type> certificate_filename = optional<string_type>(),
       optional<string_type> const &verify_path = optional<string_type>(),
       optional<string_type> certificate_file = optional<string_type>(),
@@ -56,7 +63,8 @@ struct async_connection_base {
         certificate_filename, verify_path, certificate_file, private_key_file,
         ciphers, sni_hostname, ssl_options);
     auto temp = std::make_shared<async_connection>(
-        resolver, resolve, follow_redirect, timeout, std::move(delegate));
+        resolver, resolve, follow_redirect, timeout, remove_chunk_markers,
+        std::move(delegate));
     BOOST_ASSERT(temp != nullptr);
     return temp;
   }

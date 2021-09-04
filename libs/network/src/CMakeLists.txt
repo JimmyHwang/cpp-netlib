@@ -42,9 +42,22 @@ set_target_properties(cppnetlib-client-connections
     PROPERTIES VERSION ${CPPNETLIB_VERSION_STRING}
     SOVERSION ${CPPNETLIB_VERSION_MAJOR}
     PUBLIC_HEADER "${CPP-NETLIB_HEADERS}")
+target_link_libraries(cppnetlib-client-connections ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 if (OPENSSL_FOUND)
     target_link_libraries(cppnetlib-client-connections ${OPENSSL_LIBRARIES})
+    if (CPP-NETLIB_STATIC_OPENSSL)
+      if (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD" OR ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD")
+        set(BSD ON)
+      endif()
+      if (NOT MSVC AND NOT MINGW AND NOT BSD) # dynlinker functions are built into libc on BSD
+        target_link_libraries(cppnetlib-client-connections "-ldl")
+      endif()
+    endif()
 endif ()
+if (MINGW)
+    target_link_libraries(cppnetlib-client-connections ws2_32)
+endif ()
+
 install(TARGETS cppnetlib-client-connections
     EXPORT cppnetlibTargets
     PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}

@@ -7,7 +7,7 @@
 // http://www.boost.org/LICENSE_1_0.txt)
 
 #include <memory>
-#include <asio/io_service.hpp>
+#include <boost/asio/io_service.hpp>
 #include <boost/mpl/and.hpp>
 #include <boost/mpl/if.hpp>
 #include <boost/mpl/not.hpp>
@@ -74,10 +74,12 @@ struct basic_client_impl
                     optional<string_type> const& private_key_file,
                     optional<string_type> const& ciphers,
                     optional<string_type> const& sni_hostname, long ssl_options,
-                    std::shared_ptr<asio::io_service> service, int timeout)
-      : base_type(cache_resolved, follow_redirect, always_verify_peer, timeout,
-                  service, certificate_filename, verify_path, certificate_file,
-                  private_key_file, ciphers, sni_hostname, ssl_options) {}
+                    std::shared_ptr<boost::asio::io_service> service, int timeout,
+                    bool remove_chunk_markers)
+      : base_type(cache_resolved, follow_redirect, always_verify_peer, timeout, 
+                  remove_chunk_markers, service, certificate_filename, verify_path,
+                  certificate_file, private_key_file, ciphers, sni_hostname,
+                  ssl_options) {}
 
   ~basic_client_impl() = default;
 };

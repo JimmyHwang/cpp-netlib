@@ -29,7 +29,18 @@ struct hello_world {
     unsigned int port = request.source_port;
     std::ostringstream data;
     data << "Hello, " << ip << ':' << port << '!';
-    connection->write(data.str());
+
+    std::map<std::string, std::string> headers = {
+      {"Content-Length", "0"},
+      {"Content-Type", "text/plain"},
+    };
+
+    auto body = data.str();
+    headers["Content-Length"] = std::to_string(body.size());
+
+    connection->set_status(server::connection::ok);
+    connection->set_headers(headers);
+    connection->write(body);
   }
 };
 
